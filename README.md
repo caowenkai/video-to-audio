@@ -177,7 +177,7 @@ npm run build
 
 ## 作者
 
-MiniMax Agent
+MiniMax Agent &  maoxiansheng
 
 ## 致谢
 
