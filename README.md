@@ -21,6 +21,7 @@
 
 - Node.js 16.x 或更高版本
 - FFmpeg（必须安装并添加到系统PATH）
+- yt-dlp（可选，用于从 Bilibili 等在线视频平台提取音频）
 
 ## 快速开始
 
@@ -47,7 +48,31 @@ sudo apt-get install ffmpeg
 sudo yum install ffmpeg
 ```
 
-### 2. 安装依赖
+### 2. 安装 yt-dlp（可选，用于在线视频）
+
+如果需要从 Bilibili 等在线视频平台提取音频，需要安装 yt-dlp：
+
+**macOS:**
+```bash
+brew install yt-dlp
+```
+
+**Linux/Windows:**
+```bash
+pip install yt-dlp
+```
+
+或者使用 pipx（推荐）：
+```bash
+pipx install yt-dlp
+```
+
+**Windows (使用 pip):**
+```bash
+pip install yt-dlp
+```
+
+### 3. 安装依赖
 
 首次运行前，需要安装项目依赖：
 
@@ -59,7 +84,7 @@ npm install
 pnpm install --prefer-offline
 ```
 
-### 3. 启动应用
+### 4. 启动应用
 
 ```bash
 npm start
@@ -70,11 +95,26 @@ npm start
 2. 启动后端服务器（端口3001）
 3. 启动前端开发服务器（端口5173）
 
-### 4. 访问应用
+### 5. 访问应用
 
 打开浏览器访问：http://localhost:5173
 
 ## 使用方法
+
+### 方法一：从 Bilibili 视频提取音频
+
+1. **输入 Bilibili 视频链接**
+   - 在"从 Bilibili 视频提取音频"区域
+   - 粘贴 Bilibili 视频 URL（如：`https://www.bilibili.com/video/BV17uxSzDEEo`）
+   - 或粘贴 iframe 代码（如：`<iframe src="//player.bilibili.com/player.html?bvid=BV17uxSzDEEo"></iframe>`）
+   - 点击"开始提取音频"按钮
+
+2. **等待处理**
+   - 系统会自动下载视频
+   - 然后提取音频并转换
+   - 实时查看下载和转换进度
+
+### 方法二：上传本地视频文件
 
 1. **上传视频文件**
    - 拖拽视频文件到上传区域

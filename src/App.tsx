@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Upload, FileAudio, Download, Trash2, Settings, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { Upload, FileAudio, Download, Trash2, Settings, CheckCircle2, XCircle, Loader2, Link } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Progress } from './components/ui/progress';
@@ -43,6 +43,8 @@ function App() {
     channels: '2'
   });
   const [isUploading, setIsUploading] = useState(false);
+  const [bilibiliUrl, setBilibiliUrl] = useState('');
+  const [isDownloading, setIsDownloading] = useState(false);
 
   // 初始化Socket.IO连接
   useEffect(() => {
@@ -85,6 +87,128 @@ function App() {
       newSocket.close();
     };
   }, []);
+
+  // 从 iframe 或 URL 中提取 Bilibili URL
+  const extractBilibiliUrl = (input: string): string | null => {
+    // 清理输入
+    const cleaned = input.trim();
+    
+    // 如果是 iframe，提取 src 中的 URL
+    const iframeMatch = cleaned.match(/src=["']([^"']*player\.bilibili\.com[^"']*)["']/);
+    if (iframeMatch) {
+      let url = iframeMatch[1];
+      // 如果是相对路径，添加协议
+      if (url.startsWith('//')) {
+        url = 'https:' + url;
+      }
+      // 从 player URL 中提取 bvid 或 aid，构建标准视频 URL
+      const bvidMatch = url.match(/[?&]bvid=([^&]+)/);
+      const aidMatch = url.match(/[?&]aid=([^&]+)/);
+      // 提取分集参数 p（重要：用于区分多集视频的不同分集）
+      const pMatch = url.match(/[?&]p=(\d+)/);
+      const pParam = pMatch ? `?p=${pMatch[1]}` : '';
+      
+      if (bvidMatch) {
+        return `https://www.bilibili.com/video/${bvidMatch[1]}${pParam}`;
+      } else if (aidMatch) {
+        return `https://www.bilibili.com/video/av${aidMatch[1]}${pParam}`;
+      }
+      // 如果无法提取，返回原始 URL（yt-dlp 可能能处理）
+      return url;
+    }
+    
+    // 如果是直接的 URL
+    if (cleaned.includes('bilibili.com') || cleaned.includes('player.bilibili.com')) {
+      // 提取完整的 URL
+      const urlMatch = cleaned.match(/(https?:\/\/[^\s<>"']*bilibili\.com[^\s<>"']*)/);
+      if (urlMatch) {
+        return urlMatch[1];
+      }
+      // 如果是相对路径，添加协议
+      if (cleaned.startsWith('//')) {
+        return 'https:' + cleaned;
+      }
+      // 尝试提取 bvid 或 aid，同时保留分集参数 p
+      const bvidMatch = cleaned.match(/BV[a-zA-Z0-9]+/);
+      const aidMatch = cleaned.match(/[?&]aid=(\d+)/);
+      const pMatch = cleaned.match(/[?&]p=(\d+)/);
+      const pParam = pMatch ? `?p=${pMatch[1]}` : '';
+      
+      if (bvidMatch) {
+        return `https://www.bilibili.com/video/${bvidMatch[0]}${pParam}`;
+      } else if (aidMatch) {
+        return `https://www.bilibili.com/video/av${aidMatch[1]}${pParam}`;
+      }
+      return cleaned;
+    }
+    
+    return null;
+  };
+
+  // 处理 Bilibili URL 转换
+  const handleBilibiliUrl = useCallback(async () => {
+    if (!bilibiliUrl.trim() || !socket) return;
+
+    const extractedUrl = extractBilibiliUrl(bilibiliUrl.trim());
+    if (!extractedUrl) {
+      alert('请输入有效的 Bilibili 视频 URL 或 iframe 代码');
+      return;
+    }
+
+    setIsDownloading(true);
+    const taskId = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // 添加任务到列表
+    const newTask: ConversionTask = {
+      id: taskId,
+      originalName: `Bilibili视频 - ${extractedUrl}`,
+      status: 'pending',
+      progress: 0,
+      format: options.format,
+      createdAt: new Date()
+    };
+    setTasks(prev => [...prev, newTask]);
+
+    try {
+      const response = await fetch(`${API_URL}/api/convert-bilibili`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: extractedUrl,
+          format: options.format,
+          bitrate: options.bitrate,
+          sampleRate: options.sampleRate,
+          channels: options.channels,
+          socketId: socket.id || ''
+        })
+      });
+
+      const result = await response.json();
+
+      if (!result.success) {
+        throw new Error(result.error || '转换失败');
+      }
+
+      // 更新taskId为服务器返回的ID
+      setTasks(prev => prev.map(task => 
+        task.id === taskId ? { ...task, id: result.taskId } : task
+      ));
+
+      // 清空输入框
+      setBilibiliUrl('');
+
+    } catch (error) {
+      setTasks(prev => prev.map(task => 
+        task.id === taskId 
+          ? { ...task, status: 'error', error: (error as Error).message } 
+          : task
+      ));
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [bilibiliUrl, socket, options]);
 
   // 处理文件上传
   const handleFileUpload = useCallback(async (files: FileList | null) => {
@@ -224,6 +348,47 @@ function App() {
           </TabsList>
 
           <TabsContent value="convert" className="space-y-6">
+            {/* Bilibili URL 输入区域 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Link className="h-5 w-5" />
+                  从 Bilibili 视频提取音频
+                </CardTitle>
+                <CardDescription>支持输入 Bilibili 视频 URL 或 iframe 代码</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="bilibili-url">Bilibili 视频链接或 iframe</Label>
+                  <textarea
+                    id="bilibili-url"
+                    value={bilibiliUrl}
+                    onChange={(e) => setBilibiliUrl(e.target.value)}
+                    placeholder="粘贴 Bilibili 视频 URL 或 iframe 代码，例如：&#10;https://www.bilibili.com/video/BV17uxSzDEEo&#10;或&#10;&lt;iframe src=&quot;//player.bilibili.com/player.html?aid=115330022181628&amp;bvid=BV17uxSzDEEo&quot;&gt;&lt;/iframe&gt;"
+                    className="w-full min-h-[100px] px-3 py-2 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
+                    disabled={isDownloading}
+                  />
+                </div>
+                <Button
+                  onClick={handleBilibiliUrl}
+                  disabled={!bilibiliUrl.trim() || isDownloading || !socket}
+                  className="w-full"
+                >
+                  {isDownloading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      下载中...
+                    </>
+                  ) : (
+                    <>
+                      <Link className="h-4 w-4 mr-2" />
+                      开始提取音频
+                    </>
+                  )}
+                </Button>
+              </CardContent>
+            </Card>
+
             {/* 上传区域 */}
             <Card>
               <CardHeader>

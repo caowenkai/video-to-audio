@@ -6,8 +6,10 @@ const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 const app = express();
 const server = http.createServer(app);
@@ -525,6 +527,194 @@ app.post('/api/convert', upload.single('video'), async (req, res) => {
       taskId: path.basename(outputPath, path.extname(outputPath)),
       originalName: req.file.originalname
     });
+
+  } catch (error) {
+    console.error('处理错误:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 下载 Bilibili 视频并转换为音频
+app.post('/api/convert-bilibili', async (req, res) => {
+  try {
+    const { url, format = 'mp3', bitrate, sampleRate, channels } = req.body;
+    const socketId = req.body.socketId;
+
+    if (!url) {
+      return res.status(400).json({ error: '未提供视频 URL' });
+    }
+
+    // 验证 URL 是否为 Bilibili 链接
+    if (!url.includes('bilibili.com') && !url.includes('player.bilibili.com')) {
+      return res.status(400).json({ error: '仅支持 Bilibili 视频链接' });
+    }
+
+    // 生成任务 ID
+    const taskId = `bilibili-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const videoFileName = `${taskId}.%(ext)s`;
+    const videoPath = path.join(UPLOAD_DIR, videoFileName);
+
+    // 检查 yt-dlp 是否可用
+    let ytdlpCommand = 'yt-dlp';
+    try {
+      await execAsync('which yt-dlp || which youtube-dl');
+    } catch (err) {
+      // 尝试检查是否安装了 yt-dlp 或 youtube-dl
+      try {
+        await execAsync('yt-dlp --version');
+      } catch (e1) {
+        try {
+          await execAsync('youtube-dl --version');
+          ytdlpCommand = 'youtube-dl';
+        } catch (e2) {
+          return res.status(500).json({ 
+            error: '未找到 yt-dlp 或 youtube-dl。请先安装：\n' +
+                   'macOS: brew install yt-dlp\n' +
+                   'Linux: pip install yt-dlp\n' +
+                   'Windows: pip install yt-dlp'
+          });
+        }
+      }
+    }
+
+    console.log('=== 开始下载 Bilibili 视频 ===');
+    console.log('URL:', url);
+    console.log('使用工具:', ytdlpCommand);
+    console.log('输出路径:', videoPath);
+
+    // 通知客户端开始下载
+    io.to(socketId).emit('conversionStart', { taskId, message: '开始下载视频...' });
+    io.to(socketId).emit('conversionProgress', { taskId, progress: 10 });
+
+    // 下载视频
+    // 使用绝对路径，并转义特殊字符
+    const escapedVideoPath = videoPath.replace(/"/g, '\\"');
+    // yt-dlp 参数说明：
+    // -f: 选择最佳视频+音频格式，或最佳单一格式
+    // -x: 仅提取音频（但我们先下载视频再转换，这样更灵活）
+    // --no-playlist: 不下载播放列表，只下载单个视频
+    // --extractor-args "bilibili:codec=avc": 可选，指定编码格式
+    // --user-agent: 设置用户代理，避免被识别为爬虫
+    let downloadCommand = `${ytdlpCommand} -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "${escapedVideoPath}" --no-playlist --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" "${url}"`;
+    
+    console.log('执行下载命令:', downloadCommand);
+    
+    let downloadSuccess = false;
+    let stdout = '';
+    let stderr = '';
+    
+    try {
+      // 第一次尝试：正常下载
+      const result = await execAsync(downloadCommand, { 
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+        timeout: 600000 // 10分钟超时
+      });
+      stdout = result.stdout || '';
+      stderr = result.stderr || '';
+      downloadSuccess = true;
+    } catch (firstError) {
+      // 如果遇到 SSL 证书错误，尝试使用 --no-check-certificate
+      if (firstError.message && firstError.message.includes('CERTIFICATE_VERIFY_FAILED')) {
+        console.log('检测到 SSL 证书错误，尝试使用 --no-check-certificate 参数重试...');
+        downloadCommand = `${ytdlpCommand} -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "${escapedVideoPath}" --no-playlist --no-check-certificate --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" "${url}"`;
+        console.log('重试下载命令:', downloadCommand);
+        
+        try {
+          const retryResult = await execAsync(downloadCommand, { 
+            maxBuffer: 10 * 1024 * 1024,
+            timeout: 600000
+          });
+          stdout = retryResult.stdout || '';
+          stderr = retryResult.stderr || '';
+          downloadSuccess = true;
+        } catch (retryError) {
+          throw retryError; // 如果重试也失败，抛出错误
+        }
+      } else {
+        throw firstError; // 如果不是 SSL 错误，直接抛出
+      }
+    }
+    
+    try {
+      if (!downloadSuccess) {
+        throw new Error('视频下载失败：下载未成功');
+      }
+      
+      if (stderr) {
+        console.log('yt-dlp 输出:', stderr);
+      }
+      if (stdout) {
+        console.log('yt-dlp 信息:', stdout);
+      }
+      
+      // 查找下载的文件（yt-dlp 可能会改变扩展名）
+      let downloadedFile = null;
+      const files = fs.readdirSync(UPLOAD_DIR);
+      const matchingFiles = files.filter(f => f.startsWith(taskId));
+      
+      if (matchingFiles.length > 0) {
+        // 找到最大的文件（通常是视频文件）
+        downloadedFile = matchingFiles.reduce((prev, curr) => {
+          const prevPath = path.join(UPLOAD_DIR, prev);
+          const currPath = path.join(UPLOAD_DIR, curr);
+          return fs.statSync(currPath).size > fs.statSync(prevPath).size ? curr : prev;
+        });
+      }
+
+      if (!downloadedFile || !fs.existsSync(path.join(UPLOAD_DIR, downloadedFile))) {
+        throw new Error('视频下载失败：未找到下载的文件');
+      }
+
+      const inputPath = path.join(UPLOAD_DIR, downloadedFile);
+      const baseFileName = path.basename(downloadedFile, path.extname(downloadedFile));
+      const outputFileName = `${baseFileName}.${format}`;
+      const outputPath = path.resolve(OUTPUT_DIR, outputFileName);
+
+      console.log('视频下载完成:', inputPath);
+      io.to(socketId).emit('conversionProgress', { taskId, progress: 50 });
+
+      // 转换视频为音频
+      const options = {
+        bitrate: bitrate || '192k',
+        sampleRate: sampleRate || null,
+        channels: channels || null
+      };
+
+      // 异步处理转换
+      convertVideoToAudio(inputPath, outputPath, format, options, socketId)
+        .catch(err => {
+          console.error('转换失败:', err);
+          // 清理下载的视频文件
+          try {
+            if (fs.existsSync(inputPath)) {
+              fs.unlinkSync(inputPath);
+            }
+          } catch (cleanupErr) {
+            console.error('清理文件失败:', cleanupErr);
+          }
+        });
+
+      res.json({
+        success: true,
+        message: '视频下载成功，开始转换',
+        taskId: path.basename(outputPath, path.extname(outputPath)),
+        originalName: `Bilibili视频 - ${url}`
+      });
+
+    } catch (downloadError) {
+      console.error('下载错误:', downloadError);
+      io.to(socketId).emit('conversionError', {
+        taskId,
+        error: `视频下载失败: ${downloadError.message}`,
+        errorType: 'download_error',
+        errorSolution: '请检查 URL 是否正确，或视频是否可访问。确保已安装 yt-dlp。'
+      });
+      
+      res.status(500).json({ 
+        error: `视频下载失败: ${downloadError.message}`,
+        suggestion: '请确保已安装 yt-dlp (brew install yt-dlp 或 pip install yt-dlp)'
+      });
+    }
 
   } catch (error) {
     console.error('处理错误:', error);
